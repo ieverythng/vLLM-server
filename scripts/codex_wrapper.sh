@@ -158,14 +158,9 @@ timeout --signal=TERM --kill-after=10s "${timeout_s}" \
 exit_code=$?
 set -e
 
-if [[ -f "${last_message_file}" ]]; then
-  :
-fi
-
 git -C "${target_dir}" status --short --untracked-files=all > "${post_status_file}" || true
 
 git -C "${target_dir}" diff --name-only --diff-filter=ACMRTUXB > "${changed_file_list}" || true
-# Include untracked files from status if present.
 python3 - "${post_status_file}" "${changed_file_list}" <<'PY'
 import sys
 from pathlib import Path

@@ -29,6 +29,16 @@ class VLLMManager:
         with open(self.config_path) as f:
             return yaml.safe_load(f)
 
+    @staticmethod
+    def _append_option(cmd: list[str], flag: str, value: object) -> None:
+        if value not in (None, ""):
+            cmd.extend([flag, str(value)])
+
+    @staticmethod
+    def _append_flag(cmd: list[str], flag: str, enabled: bool) -> None:
+        if enabled:
+            cmd.append(flag)
+
     def _build_command(self) -> list[str]:
         """Build the vLLM serve command from config."""
         vllm_cfg = self.config.get("vllm", {})
@@ -42,24 +52,16 @@ class VLLMManager:
             "--port", str(server_cfg.get("port", 8000)),
         ]
 
-        # Optional params
-        if vllm_cfg.get("quantization"):
-            cmd.extend(["--quantization", vllm_cfg["quantization"]])
-        if vllm_cfg.get("gpu_memory_utilization"):
-            cmd.extend(["--gpu-memory-utilization", str(vllm_cfg["gpu_memory_utilization"])])
-        if vllm_cfg.get("max_model_len"):
-            cmd.extend(["--max-model-len", str(vllm_cfg["max_model_len"])])
-        if vllm_cfg.get("dtype"):
-            cmd.extend(["--dtype", vllm_cfg["dtype"]])
-        if vllm_cfg.get("tensor_parallel_size", 1) > 1:
-            cmd.extend(["--tensor-parallel-size", str(vllm_cfg["tensor_parallel_size"])])
-        if vllm_cfg.get("enable_prefix_caching"):
-            cmd.append("--enable-prefix-caching")
+        tensor_parallel_size = int(vllm_cfg.get("tensor_parallel_size", 1))
+        self._append_option(cmd, "--quantization", vllm_cfg.get("quantization"))
+        self._append_option(cmd, "--gpu-memory-utilization", vllm_cfg.get("gpu_memory_utilization"))
+        self._append_option(cmd, "--max-model-len", vllm_cfg.get("max_model_len"))
+        self._append_option(cmd, "--dtype", vllm_cfg.get("dtype"))
+        self._append_option(cmd, "--tensor-parallel-size", tensor_parallel_size if tensor_parallel_size > 1 else None)
+        self._append_flag(cmd, "--enable-prefix-caching", bool(vllm_cfg.get("enable_prefix_caching")))
 
-        # API key
         api_key = os.environ.get("VLLM_API_KEY", self.config.get("auth", {}).get("api_key", ""))
-        if api_key:
-            cmd.extend(["--api-key", f"bearer {api_key}"])
+        self._append_option(cmd, "--api-key", f"bearer {api_key}" if api_key else None)
 
         return cmd
 
@@ -69,7 +71,6 @@ class VLLMManager:
             print("vLLM server is already running.")
             return True
 
-        # Check GPU availability
         gpu_ok = self._check_gpu()
         if not gpu_ok:
             print("ERROR: GPU not available or insufficient memory.")
@@ -103,7 +104,6 @@ class VLLMManager:
         import httpx
 
         server_cfg = self.config.get("server", {})
-        host = server_cfg.get("host", "0.0.0.0")
         port = server_cfg.get("port", 8000)
         url = f"http://127.0.0.1:{port}/v1/models"
 
@@ -208,14 +208,13 @@ class VLLMManager:
             )
             if result.returncode != 0:
                 return False
-            lines = result.stdout.strip().split("\n")[1:]  # Skip header
+            lines = result.stdout.strip().split("\n")[1:]
             for line in lines:
                 total, used = line.split(",")
                 total_mb = int(total.strip().replace(" MiB", ""))
                 used_mb = int(used.strip().replace(" MiB", ""))
                 free_mb = total_mb - used_mb
                 print(f"GPU: {total_mb} MiB total, {used_mb} MiB used, {free_mb} MiB free")
-                # Need at least 12 GB free for a 27B Q3 model
                 if free_mb < 12288:
                     print(f"WARNING: Only {free_mb} MiB GPU memory free. May need to free up resources.")
             return True

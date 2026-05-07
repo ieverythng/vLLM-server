@@ -81,6 +81,14 @@ class DevHarnessAdapter:
     def __init__(self, wrapper_path: Path | None = None) -> None:
         self.wrapper_path = Path(wrapper_path) if wrapper_path else DEFAULT_WRAPPER
 
+    def _resolve_existing_dir(self, value: str, label: str) -> Path:
+        path = Path(value).expanduser().resolve()
+        if not path.exists():
+            raise DevHarnessError(f"{label} does not exist: {path}")
+        if not path.is_dir():
+            raise DevHarnessError(f"{label} is not a directory: {path}")
+        return path
+
     def run_dev_harness(
         self,
         harness: str,
@@ -92,17 +100,8 @@ class DevHarnessAdapter:
         allow_shell: bool = False,
         worktree: str | None = None,
     ) -> HarnessRunResult:
-        repo = Path(repo_path).expanduser().resolve()
-        if not repo.exists():
-            raise DevHarnessError(f"repo_path does not exist: {repo}")
-        if not repo.is_dir():
-            raise DevHarnessError(f"repo_path is not a directory: {repo}")
-
-        target_dir = Path(worktree).expanduser().resolve() if worktree else repo
-        if not target_dir.exists():
-            raise DevHarnessError(f"worktree does not exist: {target_dir}")
-        if not target_dir.is_dir():
-            raise DevHarnessError(f"worktree is not a directory: {target_dir}")
+        repo = self._resolve_existing_dir(repo_path, "repo_path")
+        target_dir = self._resolve_existing_dir(worktree, "worktree") if worktree else repo
 
         if harness not in SUPPORTED_HARNESSES:
             raise DevHarnessError(f"unsupported harness: {harness}")
@@ -197,7 +196,6 @@ class DevHarnessAdapter:
 
     def _build_sandbox_env(self) -> Dict[str, str]:
         env = os.environ.copy()
-        # Default to no outbound network access for supervised runs.
         env["HTTP_PROXY"] = "http://127.0.0.1:9"
         env["HTTPS_PROXY"] = "http://127.0.0.1:9"
         env["ALL_PROXY"] = "http://127.0.0.1:9"
@@ -234,8 +232,6 @@ class DevHarnessAdapter:
         if not text:
             return {}
 
-        # The wrapper emits a single JSON object, but if the harness streams
-        # additional logs we try the last non-empty line first.
         candidates = [line.strip() for line in text.splitlines() if line.strip()]
         for candidate in reversed(candidates):
             try:

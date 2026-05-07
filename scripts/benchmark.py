@@ -137,11 +137,7 @@ class BenchmarkConfig:
     concurrency: int
     num_requests: int
     timeout_s: float
-    config_path: Path
 
-
-class BenchmarkError(RuntimeError):
-    pass
 
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -216,6 +212,39 @@ def extract_tool_calls(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def cycle_prompts(prompts: List[str], count: int) -> List[str]:
+    return [prompts[i % len(prompts)] for i in range(count)]
+
+
+def success_rate(results: List[RequestResult], predicate) -> Optional[float]:
+    if not results:
+        return None
+    return sum(1 for result in results if predicate(result)) / len(results)
+
+
+def build_chat_jobs(
+    client: httpx.AsyncClient,
+    base_url: str,
+    model: str,
+    system_prompt: str,
+    prompts: List[str],
+    timeout_s: float,
+    **kwargs: Any,
+) -> Iterable[Awaitable[RequestResult]]:
+    return (
+        bench_chat_completion(
+            client,
+            base_url,
+            model,
+            system_prompt,
+            prompt,
+            timeout_s,
+            **kwargs,
+        )
+        for prompt in prompts
+    )
+
+
 def strip_code_fences(text: str) -> str:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -258,7 +287,6 @@ async def stream_ttft(
 ) -> RequestResult:
     start = time.perf_counter()
     first_token_ms: Optional[float] = None
-    text_fragments: List[str] = []
     try:
         async with client.stream("POST", url, json=payload, timeout=timeout_s) as resp:
             resp.raise_for_status()
@@ -395,17 +423,17 @@ async def bench_itrader_generate(
 
 
 async def run_concurrent(
-    factories: Iterable[Awaitable[RequestResult]],
+    jobs: Iterable[Awaitable[RequestResult]],
     concurrency: int,
 ) -> List[RequestResult]:
     """Run awaitables with a concurrency cap and preserve completion order."""
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def guarded(awaitable: Awaitable[RequestResult]):
+    async def guarded(job: Awaitable[RequestResult]):
         async with semaphore:
-            return await awaitable
+            return await job
 
-    tasks = [asyncio.create_task(guarded(factory)) for factory in factories]
+    tasks = [asyncio.create_task(guarded(job)) for job in jobs]
     results: List[RequestResult] = []
     for task in asyncio.as_completed(tasks):
         results.append(await task)
@@ -558,13 +586,13 @@ async def run_benchmark(cfg: BenchmarkConfig) -> Tuple[str, Dict[str, SummarySta
     limits = httpx.Limits(max_keepalive_connections=max(10, cfg.concurrency), max_connections=max(20, cfg.concurrency * 2))
     timeout = httpx.Timeout(cfg.timeout_s, connect=min(10.0, cfg.timeout_s))
     async with httpx.AsyncClient(limits=limits, timeout=timeout) as client:
-        # Single Hermes-style request
+        single_prompt = HERMES_USER_PROMPTS[0]
         single_result = await bench_chat_completion(
             client,
             cfg.base_url,
             cfg.model,
             LONG_HERMES_SYSTEM_PROMPT,
-            HERMES_USER_PROMPTS[0],
+            single_prompt,
             cfg.timeout_s,
             temperature=0.2,
             max_tokens=512,
@@ -572,13 +600,12 @@ async def run_benchmark(cfg: BenchmarkConfig) -> Tuple[str, Dict[str, SummarySta
             user="WatsonMain",
         )
 
-        # Streaming TTFT for the same style of workload
         single_ttft_result = await bench_chat_completion(
             client,
             cfg.base_url,
             cfg.model,
             LONG_HERMES_SYSTEM_PROMPT,
-            HERMES_USER_PROMPTS[0],
+            single_prompt,
             cfg.timeout_s,
             temperature=0.2,
             max_tokens=256,
@@ -586,104 +613,85 @@ async def run_benchmark(cfg: BenchmarkConfig) -> Tuple[str, Dict[str, SummarySta
             user="WatsonMain",
         )
 
-        # Concurrent Hermes-style workload with a cap
         concurrent_results = await run_concurrent(
-            (
-                bench_chat_completion(
-                    client,
-                    cfg.base_url,
-                    cfg.model,
-                    LONG_HERMES_SYSTEM_PROMPT,
-                    HERMES_USER_PROMPTS[i % len(HERMES_USER_PROMPTS)],
-                    cfg.timeout_s,
-                    temperature=0.2,
-                    max_tokens=512,
-                    stream=False,
-                    user="WatsonMain",
-                )
-                for i in range(cfg.num_requests)
+            build_chat_jobs(
+                client,
+                cfg.base_url,
+                cfg.model,
+                LONG_HERMES_SYSTEM_PROMPT,
+                cycle_prompts(HERMES_USER_PROMPTS, cfg.num_requests),
+                cfg.timeout_s,
+                temperature=0.2,
+                max_tokens=512,
+                stream=False,
+                user="WatsonMain",
             ),
             cfg.concurrency,
         )
 
-        # Streaming TTFT under concurrency: run a smaller set using the same concurrency cap
         ttft_count = max(1, min(cfg.concurrency, cfg.num_requests))
         ttft_results = await run_concurrent(
-            (
-                bench_chat_completion(
-                    client,
-                    cfg.base_url,
-                    cfg.model,
-                    LONG_HERMES_SYSTEM_PROMPT,
-                    HERMES_USER_PROMPTS[i % len(HERMES_USER_PROMPTS)],
-                    cfg.timeout_s,
-                    temperature=0.2,
-                    max_tokens=256,
-                    stream=True,
-                    user="WatsonMain",
-                )
-                for i in range(ttft_count)
+            build_chat_jobs(
+                client,
+                cfg.base_url,
+                cfg.model,
+                LONG_HERMES_SYSTEM_PROMPT,
+                cycle_prompts(HERMES_USER_PROMPTS, ttft_count),
+                cfg.timeout_s,
+                temperature=0.2,
+                max_tokens=256,
+                stream=True,
+                user="WatsonMain",
             ),
             cfg.concurrency,
         )
 
-        # Structured JSON reliability on chat completions
         json_results = await run_concurrent(
-            (
-                bench_chat_completion(
-                    client,
-                    cfg.base_url,
-                    cfg.model,
-                    "You output only valid JSON, no markdown, no prose.",
-                    JSON_PROMPTS[i % len(JSON_PROMPTS)],
-                    cfg.timeout_s,
-                    temperature=0.0,
-                    max_tokens=256,
-                    stream=False,
-                    response_format={"type": "json_object"},
-                    user="iTrader",
-                )
-                for i in range(cfg.num_requests)
+            build_chat_jobs(
+                client,
+                cfg.base_url,
+                cfg.model,
+                "You output only valid JSON, no markdown, no prose.",
+                cycle_prompts(JSON_PROMPTS, cfg.num_requests),
+                cfg.timeout_s,
+                temperature=0.0,
+                max_tokens=256,
+                stream=False,
+                response_format={"type": "json_object"},
+                user="iTrader",
             ),
             cfg.concurrency,
         )
 
-        # iTrader-style generation endpoint
         itrader_results = await run_concurrent(
             (
                 bench_itrader_generate(
                     client,
                     cfg.base_url,
                     cfg.model,
-                    ITRADER_PROMPTS[i % len(ITRADER_PROMPTS)],
+                    prompt,
                     cfg.timeout_s,
                 )
-                for i in range(cfg.num_requests)
+                for prompt in cycle_prompts(ITRADER_PROMPTS, cfg.num_requests)
             ),
             cfg.concurrency,
         )
 
-        # Tool-calling reliability
-        tool_prompt = (
-            "For the symbol AAPL, call the lookup_market_data tool with metric price and then respond briefly."
-        )
+        tool_prompt = "For the symbol AAPL, call the lookup_market_data tool with metric price and then respond briefly."
         tool_results = await run_concurrent(
-            (
-                bench_chat_completion(
-                    client,
-                    cfg.base_url,
-                    cfg.model,
-                    "You are a function-calling assistant. Prefer tool calls whenever available.",
-                    tool_prompt,
-                    cfg.timeout_s,
-                    temperature=0.0,
-                    max_tokens=256,
-                    stream=False,
-                    tools=TOOL_SPEC,
-                    tool_choice={"type": "function", "function": {"name": "lookup_market_data"}},
-                    user="WatsonDev",
-                )
-                for _ in range(cfg.num_requests)
+            build_chat_jobs(
+                client,
+                cfg.base_url,
+                cfg.model,
+                "You are a function-calling assistant. Prefer tool calls whenever available.",
+                [tool_prompt] * cfg.num_requests,
+                cfg.timeout_s,
+                temperature=0.0,
+                max_tokens=256,
+                stream=False,
+                tools=TOOL_SPEC,
+                tool_choice={"type": "function", "function": {"name": "lookup_market_data"}},
+                user="WatsonDev",
             ),
             cfg.concurrency,
         )
@@ -694,10 +702,12 @@ async def run_benchmark(cfg: BenchmarkConfig) -> Tuple[str, Dict[str, SummarySta
     itrader_stats = summarize(itrader_results)
     tool_stats = summarize(tool_results)
 
-    # Set specialized reliability rates for report visibility.
-    json_stats.json_valid_rate = sum(1 for r in json_results if r.ok and r.json_valid) / len(json_results) if json_results else None
-    itrader_stats.json_valid_rate = sum(1 for r in itrader_results if r.ok and r.json_valid) / len(itrader_results) if itrader_results else None
-    tool_stats.tool_call_rate = sum(1 for r in tool_results if r.ok and r.tool_called and r.tool_name == "lookup_market_data") / len(tool_results) if tool_results else None
+    json_stats.json_valid_rate = success_rate(json_results, lambda r: r.ok and r.json_valid)
+    itrader_stats.json_valid_rate = success_rate(itrader_results, lambda r: r.ok and r.json_valid)
+    tool_stats.tool_call_rate = success_rate(
+        tool_results,
+        lambda r: r.ok and r.tool_called and r.tool_name == "lookup_market_data",
+    )
 
     report = render_report(
         cfg=cfg,
@@ -750,7 +760,6 @@ async def main_async() -> int:
         concurrency=concurrency,
         num_requests=num_requests,
         timeout_s=timeout_s,
-        config_path=Path(args.config),
     )
 
     report, _stats = await run_benchmark(benchmark_cfg)

@@ -40,6 +40,16 @@ cleanup_pidfile() {
   [[ -f "${pid_file}" ]] && rm -f "${pid_file}"
 }
 
+start_services() {
+  start_vllm
+  start_gateway
+}
+
+stop_services() {
+  stop_gateway
+  stop_vllm
+}
+
 wait_for_http() {
   local url="$1"
   local label="$2"
@@ -165,20 +175,16 @@ print_status() {
 
 case "${1:-start}" in
   start)
-    start_vllm
-    start_gateway
+    start_services
     print_status
     ;;
   stop)
-    stop_gateway
-    stop_vllm
+    stop_services
     print_status
     ;;
   restart)
-    stop_gateway
-    stop_vllm
-    start_vllm
-    start_gateway
+    stop_services
+    start_services
     print_status
     ;;
   status)

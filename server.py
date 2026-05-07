@@ -19,7 +19,6 @@ import httpx
 import yaml
 import time
 import json
-import asyncio
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -124,6 +123,11 @@ class RequestMetrics:
         self.total_requests += 1
         self.total_tokens += entry.get("total_tokens", 0)
 
+    def reset(self):
+        self.requests.clear()
+        self.total_requests = 0
+        self.total_tokens = 0
+
     def summary(self) -> Dict[str, Any]:
         if not self.requests:
             return {"total_requests": 0}
@@ -146,12 +150,35 @@ def get_role_params(user: Optional[str]) -> Dict[str, Any]:
     """Get sampling params for a role."""
     if user and user in ROLES_CFG:
         return ROLES_CFG[user]
-    # Default params
+
     defaults = VLLM_CFG.get("default_sampling_params", {})
     return {
         "temperature": defaults.get("temperature", 0.7),
         "max_tokens": defaults.get("max_tokens", 8192),
     }
+
+
+def build_chat_payload(request: ChatCompletionRequest, *, stream: bool = False) -> Dict[str, Any]:
+    role_params = get_role_params(request.user)
+    payload = {
+        "model": request.model or VLLM_CFG.get("default_model"),
+        "messages": [message.model_dump(exclude_none=True) for message in request.messages],
+        "temperature": request.temperature if request.temperature is not None else role_params.get("temperature", 0.7),
+        "max_tokens": request.max_tokens if request.max_tokens is not None else role_params.get("max_tokens", 8192),
+    }
+    if stream:
+        payload["stream"] = True
+    if request.top_p is not None:
+        payload["top_p"] = request.top_p
+    if request.stop is not None:
+        payload["stop"] = request.stop
+    if request.tools is not None:
+        payload["tools"] = request.tools
+    if request.tool_choice is not None:
+        payload["tool_choice"] = request.tool_choice
+    if request.response_format is not None:
+        payload["response_format"] = request.response_format
+    return payload
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────
@@ -193,37 +220,8 @@ async def chat_completions(
     verify_api_key(auth_header)
 
     start_time = time.time()
-    role_params = get_role_params(request.user)
+    payload = build_chat_payload(request)
 
-    # Build vLLM request payload
-    payload = {
-        "model": request.model or VLLM_CFG.get("default_model"),
-        "messages": [m.model_dump(exclude_none=True) for m in request.messages],
-    }
-
-    # Apply role-specific defaults if not overridden
-    if request.temperature is None:
-        payload["temperature"] = role_params.get("temperature", 0.7)
-    else:
-        payload["temperature"] = request.temperature
-
-    if request.max_tokens is None:
-        payload["max_tokens"] = role_params.get("max_tokens", 8192)
-    else:
-        payload["max_tokens"] = request.max_tokens
-
-    if request.top_p is not None:
-        payload["top_p"] = request.top_p
-    if request.stop is not None:
-        payload["stop"] = request.stop
-    if request.tools is not None:
-        payload["tools"] = request.tools
-    if request.tool_choice is not None:
-        payload["tool_choice"] = request.tool_choice
-    if request.response_format is not None:
-        payload["response_format"] = request.response_format
-
-    # Forward to vLLM
     async with httpx.AsyncClient(timeout=INFERENCE_CFG.get("timeout_s", 120)) as client:
         try:
             resp = await client.post(
@@ -240,7 +238,6 @@ async def chat_completions(
 
             result = resp.json()
 
-            # Record metrics
             usage = result.get("usage", {})
             metrics.record({
                 "timestamp": datetime.now().isoformat(),
@@ -297,31 +294,8 @@ async def chat_completions_stream(
     """Streaming chat completions — directly streams from vLLM."""
     verify_api_key(auth_header)
 
-    start_time = time.time()
-    role_params = get_role_params(request.user)
-
-    payload = {
-        "model": request.model or VLLM_CFG.get("default_model"),
-        "messages": [m.model_dump(exclude_none=True) for m in request.messages],
-        "stream": True,
-    }
-
-    if request.temperature is None:
-        payload["temperature"] = role_params.get("temperature", 0.7)
-    else:
-        payload["temperature"] = request.temperature
-
-    if request.max_tokens is None:
-        payload["max_tokens"] = role_params.get("max_tokens", 8192)
-    else:
-        payload["max_tokens"] = request.max_tokens
-
-    if request.tools is not None:
-        payload["tools"] = request.tools
-    if request.tool_choice is not None:
-        payload["tool_choice"] = request.tool_choice
-    if request.response_format is not None:
-        payload["response_format"] = request.response_format
+    ttfb_start = time.time()
+    payload = build_chat_payload(request, stream=True)
 
     async def stream_generator():
         async with httpx.AsyncClient(timeout=INFERENCE_CFG.get("timeout_s", 120)) as client:
@@ -337,14 +311,14 @@ async def chat_completions_stream(
                     yield f"data: {{\"error\": \"{error_text.decode()[:100]}\"}}\n\n"
                     return
 
+                logged_ttfb = False
                 async for line in resp.aiter_lines():
                     if line.startswith("data: "):
                         yield f"{line}\n\n"
-                        # Track first token latency
-                        if start_time and line != "data: [DONE]":
-                            ttfb_ms = (time.time() - start_time) * 1000
+                        if not logged_ttfb and line != "data: [DONE]":
+                            ttfb_ms = (time.time() - ttfb_start) * 1000
                             logger.info(f"Time to first byte: {ttfb_ms:.0f}ms")
-                            start_time = None
+                            logged_ttfb = True
 
     return StreamingResponse(
         stream_generator(),
@@ -362,9 +336,7 @@ async def get_metrics():
 @app.delete("/metrics")
 async def reset_metrics():
     """Reset metrics counters."""
-    metrics.requests.clear()
-    metrics.total_requests = 0
-    metrics.total_tokens = 0
+    metrics.reset()
     return {"status": "metrics reset"}
 
 
@@ -383,10 +355,8 @@ async def itrader_generate(
 
     body = await request.json()
     prompt = body.get("prompt", "")
-    num_tasks = body.get("num_tasks", 1)
     model_override = body.get("model")
 
-    # Build system prompt for structured output
     messages = [
         {
             "role": "system",
@@ -433,7 +403,6 @@ async def startup_event():
     logger.info(f"vLLM backend: {VLLM_BASE_URL}")
     logger.info(f"Default model: {VLLM_CFG.get('default_model')}")
 
-    # Check vLLM connectivity
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"{VLLM_BASE_URL}/v1/models")
