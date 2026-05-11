@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import signal
 import subprocess
 import sys
@@ -68,13 +69,74 @@ class VLLMManager:
 
     @staticmethod
     def _python_executable() -> str:
-        windows_python = BASE_DIR / ".venv" / "Scripts" / "python.exe"
-        linux_python = BASE_DIR / "venv" / "bin" / "python"
-        if windows_python.exists():
-            return str(windows_python)
-        if linux_python.exists():
-            return str(linux_python)
+        override = os.environ.get("VLLM_PYTHON", "").strip()
+        if override and Path(override).exists():
+            return override
+
+        candidates = [
+            BASE_DIR / ".venv311" / "Scripts" / "python.exe",
+            BASE_DIR / ".venv" / "Scripts" / "python.exe",
+            BASE_DIR / ".venv311" / "bin" / "python",
+            BASE_DIR / ".venv" / "bin" / "python",
+            BASE_DIR / "venv" / "bin" / "python",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
         return sys.executable
+
+    def _runtime_probe(self) -> dict[str, Any]:
+        python_exe = self._python_executable()
+        probe = (
+            "import platform,sys; "
+            "import vllm; "
+            "print(f'python={sys.version.split()[0]} platform={platform.system()} vllm={vllm.__version__}'); "
+            "import vllm._C; "
+            "print('vllm._C=ok')"
+        )
+        result = subprocess.run(
+            [python_exe, "-c", probe],
+            capture_output=True,
+            text=True,
+            cwd=str(BASE_DIR),
+        )
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        ok = result.returncode == 0 and "vllm._C=ok" in stdout
+        message = "runtime_ok" if ok else "runtime_probe_failed"
+        if (not ok) and "No module named 'vllm._C'" in stderr:
+            message = "missing_vllm_compiled_runtime"
+        return {
+            "ok": ok,
+            "python": python_exe,
+            "message": message,
+            "stdout": stdout,
+            "stderr": stderr,
+            "platform": platform.system(),
+        }
+
+    def preflight(self) -> bool:
+        probe = self._runtime_probe()
+        payload = {
+            "python": probe["python"],
+            "platform": probe["platform"],
+            "runtime_ok": probe["ok"],
+            "message": probe["message"],
+            "stdout": probe["stdout"],
+            "stderr": probe["stderr"],
+            "gpu": self._get_gpu_info(),
+            "active_profile": self.active_profile_name(),
+            "model": self._model_ref(self.active_profile()),
+        }
+        print(yaml.dump(payload, default_flow_style=False, sort_keys=False))
+        if probe["ok"]:
+            return True
+        if probe["message"] == "missing_vllm_compiled_runtime":
+            print(
+                "Hint: compiled vLLM runtime is missing in this interpreter. "
+                "Use a Linux/WSL2 CUDA environment or an interpreter that includes vllm._C."
+            )
+        return False
 
     def active_profile_name(self) -> str:
         runtime = self.config.get("runtime", {})
@@ -142,6 +204,20 @@ class VLLMManager:
         if self.is_running():
             print("vLLM server is already running.")
             return True
+        probe = self._runtime_probe()
+        if not probe["ok"]:
+            print("ERROR: vLLM runtime preflight failed.")
+            print(f"  python: {probe['python']}")
+            if probe["stdout"]:
+                print(f"  stdout: {probe['stdout']}")
+            if probe["stderr"]:
+                print(f"  stderr: {probe['stderr']}")
+            if probe["message"] == "missing_vllm_compiled_runtime":
+                print(
+                    "  hint: missing compiled vLLM runtime (vllm._C). "
+                    "This environment cannot launch vLLM until that dependency is available."
+                )
+            return False
         if not self._check_gpu():
             print("ERROR: GPU not available or insufficient memory.")
             return False
@@ -256,9 +332,11 @@ class VLLMManager:
         return {
             "running": running,
             "pid": pid,
+            "python": self._python_executable(),
             "active_profile": self.active_profile_name(),
             "model": self._model_ref(profile),
             "model_source": profile.get("model_id"),
+            "runtime": self._runtime_probe(),
             "gpu": self._get_gpu_info(),
         }
 
@@ -342,7 +420,7 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="vLLM Server Manager")
-    parser.add_argument("action", choices=["dry-run", "start", "stop", "restart", "status"])
+    parser.add_argument("action", choices=["dry-run", "preflight", "start", "stop", "restart", "status"])
     parser.add_argument("--config", help="Path to config.yaml")
     parser.add_argument("--models", help="Path to models.yaml")
     parser.add_argument("--no-wait", action="store_true", help="Do not wait for server readiness")
@@ -355,6 +433,8 @@ def main() -> int:
             return 0
         if args.action == "start":
             return 0 if manager.start(wait_ready=not args.no_wait) else 1
+        if args.action == "preflight":
+            return 0 if manager.preflight() else 1
         if args.action == "stop":
             manager.stop()
             return 0

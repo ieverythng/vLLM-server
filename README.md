@@ -24,9 +24,9 @@ The first real vLLM-native target is `cyankiwi/Qwen3.6-27B-AWQ-INT4`, staged at 
 Use PowerShell from the repo root.
 
 ```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\pip.exe install -r requirements.txt
+C:\Users\Admin\itrader\python.exe -m venv .venv311
+.\.venv311\Scripts\python.exe -m pip install --upgrade pip
+.\.venv311\Scripts\pip.exe install -r requirements.txt
 ```
 
 For a fresh vLLM environment, the Qwen3.6 model guidance also supports:
@@ -85,7 +85,8 @@ The default network split is:
 Validate the active profile and print the exact vLLM command without downloading or starting the model:
 
 ```powershell
-.\.venv\Scripts\python.exe vllm_manager.py dry-run
+.\.venv311\Scripts\python.exe vllm_manager.py preflight
+.\.venv311\Scripts\python.exe vllm_manager.py dry-run
 ```
 
 Expected first profile command includes:
@@ -111,6 +112,7 @@ Use the Windows launcher:
 
 ```powershell
 .\scripts\start.ps1 dry-run
+.\scripts\start.ps1 preflight
 .\scripts\start.ps1 start
 .\scripts\start.ps1 status
 .\scripts\start.ps1 stop
@@ -120,10 +122,13 @@ Use the Windows launcher:
 Direct manager commands:
 
 ```powershell
-.\.venv\Scripts\python.exe vllm_manager.py start
-.\.venv\Scripts\python.exe vllm_manager.py status
-.\.venv\Scripts\python.exe vllm_manager.py stop
+.\.venv311\Scripts\python.exe vllm_manager.py preflight
+.\.venv311\Scripts\python.exe vllm_manager.py start
+.\.venv311\Scripts\python.exe vllm_manager.py status
+.\.venv311\Scripts\python.exe vllm_manager.py stop
 ```
+
+If preflight reports `missing_vllm_compiled_runtime`, the current interpreter cannot launch vLLM yet.
 
 `start.sh` is retained for WSL/Linux, but PowerShell is the supported path for this repo.
 
@@ -196,12 +201,18 @@ $env:VLLM_SMOKE_MODEL = "cyankiwi/Qwen3.6-27B-AWQ-INT4"
 Start with 16k:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\benchmark.py `
+.\.venv311\Scripts\python.exe scripts\benchmark.py `
   --base-url http://localhost:8001 `
   --model cyankiwi/Qwen3.6-27B-AWQ-INT4 `
   --concurrency 1 `
   --requests 4 `
   --output reports\qwen36_27b_awq_int4_16k_c1.md
+```
+
+iTRADER task-pool benchmark against the same endpoint:
+
+```powershell
+.\scripts\run_itrader_benchmark.ps1 -Tasks 16 -BatchSize 4
 ```
 
 Then increase to concurrency 2 and 4. Move to the 32k profile only after 16k is stable. Move to 64k only after 32k works, and test only concurrency 1 first.

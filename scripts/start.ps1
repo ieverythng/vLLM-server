@@ -1,12 +1,24 @@
 param(
-    [ValidateSet("start", "stop", "restart", "status", "dry-run")]
+    [ValidateSet("start", "stop", "restart", "status", "dry-run", "preflight")]
     [string]$Action = "start"
 )
 
 $ErrorActionPreference = "Stop"
 
 $BaseDir = Split-Path -Parent $PSScriptRoot
-$Python = Join-Path $BaseDir ".venv\Scripts\python.exe"
+$Python = $null
+$PythonCandidates = @()
+if ($env:VLLM_PYTHON) { $PythonCandidates += $env:VLLM_PYTHON }
+$PythonCandidates += (Join-Path $BaseDir ".venv311\Scripts\python.exe")
+$PythonCandidates += (Join-Path $BaseDir ".venv\Scripts\python.exe")
+
+foreach ($candidate in $PythonCandidates) {
+    if ($candidate -and (Test-Path $candidate)) {
+        $Python = $candidate
+        break
+    }
+}
+
 $Manager = Join-Path $BaseDir "vllm_manager.py"
 $GatewayPidFile = Join-Path $BaseDir "gateway.pid"
 $GatewayLog = Join-Path $BaseDir "gateway.log"
@@ -23,8 +35,8 @@ function Log($Message) {
 }
 
 function Require-Python {
-    if (-not (Test-Path $Python)) {
-        throw "Virtualenv python not found at $Python. Create it with: py -3.11 -m venv .venv"
+    if (-not $Python -or -not (Test-Path $Python)) {
+        throw "Python runtime not found. Set VLLM_PYTHON or create .venv311/.venv in repo root."
     }
 }
 
@@ -82,6 +94,7 @@ function Stop-Gateway {
 function Show-Status {
     Require-Python
     & $Python $Manager status
+    Write-Host "python: $Python"
     if (Test-PidRunning $GatewayPidFile) {
         Write-Host "gateway: running (PID $((Get-Content $GatewayPidFile -Raw).Trim()))"
     } else {
@@ -94,6 +107,10 @@ switch ($Action) {
     "dry-run" {
         Require-Python
         & $Python $Manager dry-run
+    }
+    "preflight" {
+        Require-Python
+        & $Python $Manager preflight
     }
     "start" {
         Start-Vllm
