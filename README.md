@@ -1,0 +1,227 @@
+# vLLM Server Gateway
+
+Windows-native vLLM inference gateway for Hermes/Watson, iTrader, and future projects that need a reusable OpenAI-compatible local model service.
+
+The stack is intentionally split into two services:
+
+```text
+Clients / Apps
+    |
+    v
+FastAPI gateway  http://0.0.0.0:8001
+    |
+    v
+vLLM backend     http://127.0.0.1:8000
+    |
+    v
+NVIDIA GPU
+```
+
+The first real vLLM-native target is `cyankiwi/Qwen3.6-27B-AWQ-INT4`, staged at 16k, 32k, and 64k context profiles. The repo keeps the existing `Qwen3.6-27B-Q3_K_M.gguf` llama.cpp setup documented as rollback.
+
+## Setup
+
+Use PowerShell from the repo root.
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\pip.exe install -r requirements.txt
+```
+
+For a fresh vLLM environment, the Qwen3.6 model guidance also supports:
+
+```powershell
+uv pip install vllm --torch-backend=auto
+.\.venv\Scripts\pip.exe install -r requirements.txt
+```
+
+Confirm CUDA/GPU visibility:
+
+```powershell
+nvidia-smi
+```
+
+## Model Download
+
+The preferred local model location is:
+
+```text
+D:\MODELS\cyankiwi\Qwen3.6-27B-AWQ-INT4
+```
+
+Download manually if needed:
+
+```powershell
+.\scripts\download_model.ps1
+```
+
+`models.yaml` keeps the Hugging Face model ID and prefers the local path when it exists.
+
+## Configuration
+
+`config.yaml` selects the active profile:
+
+```yaml
+runtime:
+  active_model_profile: "qwen36_27b_awq_int4_16k"
+```
+
+Profiles live in `models.yaml`:
+
+- `qwen36_27b_awq_int4_16k`: primary first test on 16 GB VRAM
+- `qwen36_27b_awq_int4_32k`: experimental after 16k is stable
+- `qwen36_27b_awq_int4_64k_risk`: risky, single-concurrency validation only
+- `qwen_current_llamacpp_baseline`: documented fallback reference
+
+The default network split is:
+
+- vLLM backend: `127.0.0.1:8000`
+- FastAPI gateway: `0.0.0.0:8001`
+- Client API base URL: `http://localhost:8001/v1`
+
+## Dry Run
+
+Validate the active profile and print the exact vLLM command without downloading or starting the model:
+
+```powershell
+.\.venv\Scripts\python.exe vllm_manager.py dry-run
+```
+
+Expected first profile command includes:
+
+```text
+--model D:\MODELS\cyankiwi\Qwen3.6-27B-AWQ-INT4
+--quantization compressed-tensors
+--max-model-len 16384
+--cpu-offload-gb 8
+--swap-space 8
+--max-num-seqs 2
+--language-model-only
+--reasoning-parser qwen3
+--enable-auto-tool-choice
+--tool-call-parser qwen3_coder
+```
+
+If the local model directory is missing, dry-run prints the Hugging Face ID instead.
+
+## Launch
+
+Use the Windows launcher:
+
+```powershell
+.\scripts\start.ps1 dry-run
+.\scripts\start.ps1 start
+.\scripts\start.ps1 status
+.\scripts\start.ps1 stop
+.\scripts\start.ps1 restart
+```
+
+Direct manager commands:
+
+```powershell
+.\.venv\Scripts\python.exe vllm_manager.py start
+.\.venv\Scripts\python.exe vllm_manager.py status
+.\.venv\Scripts\python.exe vllm_manager.py stop
+```
+
+`start.sh` is retained for WSL/Linux, but PowerShell is the supported path for this repo.
+
+## API Smoke Tests
+
+Gateway health:
+
+```powershell
+Invoke-WebRequest http://localhost:8001/health -UseBasicParsing
+Invoke-WebRequest http://localhost:8001/v1/models -UseBasicParsing
+```
+
+Chat through the gateway:
+
+```powershell
+$body = @{
+  model = "default"
+  user = "WatsonMain"
+  messages = @(@{ role = "user"; content = "Reply with one short sentence confirming gateway routing." })
+  max_tokens = 64
+  temperature = 0.2
+} | ConvertTo-Json -Depth 8
+
+Invoke-RestMethod http://localhost:8001/v1/chat/completions `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+iTrader JSON generation:
+
+```powershell
+$body = @{
+  model = "default"
+  prompt = "Return a minimal JSON object with fields symbol, task_family, horizon_bars, confidence."
+  temperature = 0.0
+  max_tokens = 256
+  response_format = @{ type = "json_object" }
+} | ConvertTo-Json -Depth 8
+
+Invoke-RestMethod http://localhost:8001/v1/itrader/generate `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+## Validation
+
+Fast validation:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile server.py vllm_manager.py scripts\benchmark.py scripts\dev_harness_adapter.py
+.\.venv\Scripts\python.exe -m pytest
+```
+
+Full GPU validation, which can start vLLM and load the active model:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -m gpu --run-gpu
+```
+
+The GPU path uses the configured active profile by default. Override only the smoke model with:
+
+```powershell
+$env:VLLM_SMOKE_MODEL = "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+```
+
+## Benchmark Stages
+
+Start with 16k:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\benchmark.py `
+  --base-url http://localhost:8001 `
+  --model cyankiwi/Qwen3.6-27B-AWQ-INT4 `
+  --concurrency 1 `
+  --requests 4 `
+  --output reports\qwen36_27b_awq_int4_16k_c1.md
+```
+
+Then increase to concurrency 2 and 4. Move to the 32k profile only after 16k is stable. Move to 64k only after 32k works, and test only concurrency 1 first.
+
+## Pass Criteria
+
+Accept 16k as usable when:
+
+- vLLM starts reliably.
+- `/v1/models` works.
+- Chat, streaming, tool calls, and iTrader JSON work.
+- No OOM occurs.
+- Concurrency 2 works.
+- Concurrency 4 works or fails gracefully.
+
+Accept 32k only after concurrency 1 works without repeated OOM. Treat 64k as experimental even if it starts.
+
+## More Docs
+
+- [Serving topology](docs/vllm-topology.md)
+- [Qwen3.6 AWQ INT4 test plan](docs/qwen36-awq-int4-test-plan.md)
+- [Future package handoff](docs/package-handoff.md)
+- [Original GPT-5.5 handoff note](docs/HERMES_Watson_Qwen36_AWQ_INT4_Codex_Update.md)

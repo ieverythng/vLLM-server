@@ -1,0 +1,71 @@
+profiles:
+  qwen36_27b_awq_int4_16k:
+    backend: vllm
+    model_id: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+    local_path: "D:/MODELS/cyankiwi/Qwen3.6-27B-AWQ-INT4"
+    prefer_local_path: true
+    quantization: "compressed-tensors"
+    dtype: "auto"
+    max_model_len: 16384
+    gpu_memory_utilization: 0.90
+    cpu_offload_gb: 8
+    swap_space: 8
+    max_num_seqs: 2
+    tensor_parallel_size: 1
+    enable_prefix_caching: true
+    language_model_only: true
+    reasoning_parser: "qwen3"
+    enable_auto_tool_choice: true
+    tool_call_parser: "qwen3_coder"
+    notes: "Primary first test profile for RTX 5070 Ti 16GB. Start here."
+
+  qwen36_27b_awq_int4_32k:
+    backend: vllm
+    model_id: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+    local_path: "D:/MODELS/cyankiwi/Qwen3.6-27B-AWQ-INT4"
+    prefer_local_path: true
+    quantization: "compressed-tensors"
+    dtype: "auto"
+    max_model_len: 32768
+    gpu_memory_utilization: 0.92
+    cpu_offload_gb: 10
+    swap_space: 12
+    max_num_seqs: 1
+    tensor_parallel_size: 1
+    enable_prefix_caching: true
+    language_model_only: true
+    reasoning_parser: "qwen3"
+    enable_auto_tool_choice: true
+    tool_call_parser: "qwen3_coder"
+    notes: "Experimental 32k profile. Use after 16k is stable."
+
+  qwen36_27b_awq_int4_64k_risk:
+    backend: vllm
+    model_id: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+    local_path: "D:/MODELS/cyankiwi/Qwen3.6-27B-AWQ-INT4"
+    prefer_local_path: true
+    quantization: "compressed-tensors"
+    dtype: "auto"
+    max_model_len: 65536
+    gpu_memory_utilization: 0.94
+    cpu_offload_gb: 12
+    swap_space: 16
+    max_num_seqs: 1
+    tensor_parallel_size: 1
+    enable_prefix_caching: true
+    language_model_only: true
+    reasoning_parser: "qwen3"
+    enable_auto_tool_choice: true
+    tool_call_parser: "qwen3_coder"
+    notes: "Risky 64k profile. Only test after 16k and 32k pass."
+
+  qwen_current_llamacpp_baseline:
+    backend: llamacpp
+    model_id: "Qwen3.6-27B-Q3_K_M.gguf"
+    local_path: "D:/MODELS/Qwen3.6-27B-Q3_K_M.gguf"
+    context_observed: 65536
+    vram_observed_gb: 14.9
+    throughput_observed:
+      context_16k_tok_s: 40
+      context_64k_tok_s: 15
+    notes: "Rollback reference only. This repo's vLLM manager does not launch llama.cpp."

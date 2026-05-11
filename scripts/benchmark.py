@@ -287,6 +287,7 @@ async def stream_ttft(
 ) -> RequestResult:
     start = time.perf_counter()
     first_token_ms: Optional[float] = None
+    text_fragments: List[str] = []
     try:
         async with client.stream("POST", url, json=payload, timeout=timeout_s) as resp:
             resp.raise_for_status()

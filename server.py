@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI Inference Gateway — Unified OpenAI-compatible API layer.
+FastAPI Inference Gateway - Unified OpenAI-compatible API layer.
 
 Sits between clients (Hermes, iTrader, Discord, etc.) and vLLM.
 Provides:
@@ -20,22 +20,30 @@ import yaml
 import time
 import json
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
 
-# ─── Config ────────────────────────────────────────────────────────────────
+# Config
 
 BASE_DIR = Path(__file__).parent.resolve()
 
 with open(BASE_DIR / "config.yaml") as f:
     CONFIG = yaml.safe_load(f)
+MODELS_CONFIG_PATH = BASE_DIR / "models.yaml"
+if MODELS_CONFIG_PATH.exists():
+    with MODELS_CONFIG_PATH.open("r", encoding="utf-8") as f:
+        MODELS_CONFIG = yaml.safe_load(f) or {}
+else:
+    MODELS_CONFIG = {}
 
 SERVER_CFG = CONFIG.get("server", {})
+BACKEND_CFG = CONFIG.get("backend", {})
 INFERENCE_CFG = CONFIG.get("inference", {})
 ROLES_CFG = CONFIG.get("roles", {})
 VLLM_CFG = CONFIG.get("vllm", {})
 
-# ─── Logging ───────────────────────────────────────────────────────────────
+# Logging
 
 logging.basicConfig(
     level=getattr(logging, SERVER_CFG.get("log_level", "INFO").upper()),
@@ -43,7 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vllm-gateway")
 
-# ─── App ───────────────────────────────────────────────────────────────────
+# App
 
 app = FastAPI(
     title="vLLM Inference Gateway",
@@ -51,12 +59,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# vLLM backend URL (direct — no proxy overhead for the actual inference)
-VLLM_BASE_URL = f"http://127.0.0.1:{SERVER_CFG.get('port', 8000)}"
+# vLLM backend URL.
+VLLM_BASE_URL = f"http://{BACKEND_CFG.get('host', '127.0.0.1')}:{BACKEND_CFG.get('port', 8000)}"
 
-# ─── Auth ──────────────────────────────────────────────────────────────────
+# Auth
 
-API_KEY = CONFIG.get("auth", {}).get("api_key", "") or None
+API_KEY = os.environ.get("VLLM_API_KEY") or CONFIG.get("auth", {}).get("api_key", "") or None
 
 
 def verify_api_key(authorization: Optional[str] = Header(None)):
@@ -70,7 +78,33 @@ def verify_api_key(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 
-# ─── Request/Response Models ──────────────────────────────────────────────
+def backend_headers() -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
+    return headers
+
+
+def model_ids(payload: Any) -> List[str]:
+    models = payload.get("data", payload) if isinstance(payload, dict) else payload
+    if not isinstance(models, list):
+        return []
+    return [model["id"] for model in models if isinstance(model, dict) and "id" in model]
+
+
+def active_model_id() -> str:
+    active_profile = CONFIG.get("runtime", {}).get("active_model_profile")
+    profile = MODELS_CONFIG.get("profiles", {}).get(active_profile, {})
+    return str(profile.get("model_id") or VLLM_CFG.get("default_model", "cyankiwi/Qwen3.6-27B-AWQ-INT4"))
+
+
+def resolve_model_name(model: Optional[str]) -> str:
+    if not model or model == "default":
+        return active_model_id()
+    return model
+
+
+# Request/response models
 
 class Message(BaseModel):
     role: str
@@ -80,7 +114,7 @@ class Message(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default=VLLM_CFG.get("default_model", "Qwen/Qwen3.5-27B"))
+    model: str = Field(default_factory=active_model_id)
     messages: List[Message]
     temperature: Optional[float] = None
     top_p: Optional[float] = None
@@ -108,7 +142,7 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo
 
 
-# ─── Metrics ──────────────────────────────────────────────────────────────
+# Metrics
 
 class RequestMetrics:
     """Track request metrics for benchmarking."""
@@ -144,7 +178,7 @@ class RequestMetrics:
 
 metrics = RequestMetrics()
 
-# ─── Role-based routing ──────────────────────────────────────────────────
+# Role-based routing
 
 def get_role_params(user: Optional[str]) -> Dict[str, Any]:
     """Get sampling params for a role."""
@@ -161,7 +195,7 @@ def get_role_params(user: Optional[str]) -> Dict[str, Any]:
 def build_chat_payload(request: ChatCompletionRequest, *, stream: bool = False) -> Dict[str, Any]:
     role_params = get_role_params(request.user)
     payload = {
-        "model": request.model or VLLM_CFG.get("default_model"),
+        "model": resolve_model_name(request.model),
         "messages": [message.model_dump(exclude_none=True) for message in request.messages],
         "temperature": request.temperature if request.temperature is not None else role_params.get("temperature", 0.7),
         "max_tokens": request.max_tokens if request.max_tokens is not None else role_params.get("max_tokens", 8192),
@@ -181,14 +215,14 @@ def build_chat_payload(request: ChatCompletionRequest, *, stream: bool = False) 
     return payload
 
 
-# ─── Endpoints ────────────────────────────────────────────────────────────
+# Endpoints
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{VLLM_BASE_URL}/v1/models")
+            resp = await client.get(f"{VLLM_BASE_URL}/v1/models", headers=backend_headers())
             vllm_ok = resp.status_code == 200
     except Exception:
         vllm_ok = False
@@ -207,33 +241,40 @@ async def list_models(authorization: Optional[str] = Header(None)):
     verify_api_key(authorization)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(f"{VLLM_BASE_URL}/v1/models")
+        resp = await client.get(f"{VLLM_BASE_URL}/v1/models", headers=backend_headers())
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
-    auth_header: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
 ):
     """OpenAI-compatible chat completions endpoint."""
-    verify_api_key(auth_header)
+    verify_api_key(authorization)
 
     start_time = time.time()
-    payload = build_chat_payload(request)
+    payload = build_chat_payload(request, stream=request.stream)
+
+    if request.stream:
+        return StreamingResponse(
+            _proxy_stream(payload, start_time),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
 
     async with httpx.AsyncClient(timeout=INFERENCE_CFG.get("timeout_s", 120)) as client:
         try:
             resp = await client.post(
                 f"{VLLM_BASE_URL}/v1/chat/completions",
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers=backend_headers(),
             )
 
             latency_ms = (time.time() - start_time) * 1000
 
             if resp.status_code != 200:
-                logger.error(f"vLLM error: {resp.status_code} — {resp.text[:200]}")
+                logger.error(f"vLLM error: {resp.status_code} - {resp.text[:200]}")
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
             result = resp.json()
@@ -256,12 +297,6 @@ async def chat_completions(
                 f"tokens={usage.get('total_tokens', '?')}"
             )
 
-            if request.stream:
-                return StreamingResponse(
-                    _stream_response(result),
-                    media_type="text/event-stream",
-                )
-
             return JSONResponse(content=result)
 
         except httpx.TimeoutException:
@@ -270,58 +305,46 @@ async def chat_completions(
             raise HTTPException(status_code=504, detail="vLLM request timed out")
 
 
-async def _stream_response(result: Dict) -> AsyncGenerator[str, None]:
-    """Stream SSE response."""
-    if "choices" in result:
-        for choice in result["choices"]:
-            delta = choice.get("delta", {})
-            chunk = {
-                "id": result.get("id", ""),
-                "object": "chat.completion.chunk",
-                "created": result.get("created", int(time.time())),
-                "model": result.get("model", ""),
-                "choices": [{"index": 0, "delta": delta}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-    yield "data: [DONE]\n\n"
+async def _proxy_stream(payload: Dict[str, Any], ttfb_start: float) -> AsyncGenerator[str, None]:
+    """Proxy vLLM's OpenAI-compatible SSE stream."""
+    async with httpx.AsyncClient(timeout=INFERENCE_CFG.get("timeout_s", 120)) as client:
+        async with client.stream(
+            "POST",
+            f"{VLLM_BASE_URL}/v1/chat/completions",
+            json=payload,
+            headers=backend_headers(),
+        ) as resp:
+            if resp.status_code != 200:
+                error_text = await resp.aread()
+                logger.error(f"vLLM stream error: {resp.status_code} - {error_text[:200]}")
+                yield f"data: {json.dumps({'error': error_text.decode(errors='replace')[:200]})}\n\n"
+                return
+
+            logged_ttfb = False
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    yield f"{line}\n\n"
+                    if not logged_ttfb and line != "data: [DONE]":
+                        ttfb_ms = (time.time() - ttfb_start) * 1000
+                        logger.info(f"Time to first byte: {ttfb_ms:.0f}ms")
+                        logged_ttfb = True
 
 
 @app.post("/v1/chat/completions/stream")
 async def chat_completions_stream(
     request: ChatCompletionRequest,
-    auth_header: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
 ):
-    """Streaming chat completions — directly streams from vLLM."""
-    verify_api_key(auth_header)
+    """Streaming chat completions - directly streams from vLLM."""
+    verify_api_key(authorization)
 
     ttfb_start = time.time()
     payload = build_chat_payload(request, stream=True)
 
-    async def stream_generator():
-        async with httpx.AsyncClient(timeout=INFERENCE_CFG.get("timeout_s", 120)) as client:
-            async with client.stream(
-                "POST",
-                f"{VLLM_BASE_URL}/v1/chat/completions",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status_code != 200:
-                    error_text = await resp.aread()
-                    logger.error(f"vLLM stream error: {resp.status_code} — {error_text[:200]}")
-                    yield f"data: {{\"error\": \"{error_text.decode()[:100]}\"}}\n\n"
-                    return
-
-                logged_ttfb = False
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        yield f"{line}\n\n"
-                        if not logged_ttfb and line != "data: [DONE]":
-                            ttfb_ms = (time.time() - ttfb_start) * 1000
-                            logger.info(f"Time to first byte: {ttfb_ms:.0f}ms")
-                            logged_ttfb = True
-
     return StreamingResponse(
-        stream_generator(),
+        _proxy_stream(payload, ttfb_start),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
@@ -340,18 +363,18 @@ async def reset_metrics():
     return {"status": "metrics reset"}
 
 
-# ─── iTrader-specific endpoints ──────────────────────────────────────────
+# iTrader-specific endpoints
 
 @app.post("/v1/itrader/generate")
 async def itrader_generate(
     request: Request,
-    auth_header: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
 ):
     """
     Specialized endpoint for iTrader proposer generation.
     Accepts a structured prompt and returns validated JSON tasks.
     """
-    verify_api_key(auth_header)
+    verify_api_key(authorization)
 
     body = await request.json()
     prompt = body.get("prompt", "")
@@ -372,7 +395,7 @@ async def itrader_generate(
 
     async with httpx.AsyncClient(timeout=INFERENCE_CFG.get("timeout_s", 120)) as client:
         payload = {
-            "model": model_override or VLLM_CFG.get("default_model"),
+            "model": resolve_model_name(model_override),
             "messages": messages,
             "temperature": body.get("temperature", 0.5),
             "max_tokens": body.get("max_tokens", 2048),
@@ -382,6 +405,7 @@ async def itrader_generate(
         resp = await client.post(
             f"{VLLM_BASE_URL}/v1/chat/completions",
             json=payload,
+            headers=backend_headers(),
         )
 
         if resp.status_code != 200:
@@ -395,7 +419,7 @@ async def itrader_generate(
         })
 
 
-# ─── Startup ──────────────────────────────────────────────────────────────
+# Startup
 
 @app.on_event("startup")
 async def startup_event():
@@ -405,10 +429,9 @@ async def startup_event():
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{VLLM_BASE_URL}/v1/models")
+            resp = await client.get(f"{VLLM_BASE_URL}/v1/models", headers=backend_headers())
             if resp.status_code == 200:
-                models = [m["id"] for m in resp.json()]
-                logger.info(f"vLLM connected — models: {models}")
+                logger.info(f"vLLM connected - models: {model_ids(resp.json())}")
             else:
                 logger.warning(f"vLLM not responding (status {resp.status_code})")
     except Exception as e:
