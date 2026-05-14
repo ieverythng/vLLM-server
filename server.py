@@ -92,9 +92,32 @@ def model_ids(payload: Any) -> List[str]:
     return [model["id"] for model in models if isinstance(model, dict) and "id" in model]
 
 
+def resolve_local_model_path(local_path: Optional[str]) -> Optional[str]:
+    if not local_path:
+        return None
+    raw = str(local_path).strip()
+    if not raw:
+        return None
+
+    candidate = Path(raw)
+    if candidate.exists():
+        return str(candidate)
+
+    if os.name != "nt" and len(raw) > 2 and raw[1] == ":":
+        drive = raw[0].lower()
+        suffix = raw[2:].lstrip("\\/").replace("\\", "/")
+        wsl_candidate = Path(f"/mnt/{drive}/{suffix}")
+        if wsl_candidate.exists():
+            return str(wsl_candidate)
+    return None
+
+
 def active_model_id() -> str:
     active_profile = CONFIG.get("runtime", {}).get("active_model_profile")
     profile = MODELS_CONFIG.get("profiles", {}).get(active_profile, {})
+    local_path = resolve_local_model_path(profile.get("local_path"))
+    if profile.get("prefer_local_path") and local_path:
+        return local_path
     return str(profile.get("model_id") or VLLM_CFG.get("default_model", "cyankiwi/Qwen3.6-27B-AWQ-INT4"))
 
 

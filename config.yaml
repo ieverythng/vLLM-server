@@ -1,70 +1,51 @@
-# vLLM Server Configuration
-# Central config for the unified inference gateway
-
 runtime:
-  active_model_profile: "qwen36_27b_awq_int4_16k"
-
+  active_model_profile: qwen35_9b_awq_4bit_128k
 server:
-  host: "0.0.0.0"       # Listen on all interfaces (ZeroTier + localhost)
+  host: 0.0.0.0
   port: 8001
-  log_level: "info"
-
+  log_level: info
 backend:
-  host: "127.0.0.1"
+  host: 127.0.0.1
   port: 8000
-
 zerotier:
-  network_id: "3b19b3a716937e29"
+  network_id: 3b19b3a716937e29
   enabled: true
-
-# vLLM server settings
 vllm:
-  # Primary model for Hermes/Watson roles
-  default_model: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
-  
-  # Generation defaults
+  default_model: Qwen/Qwen3.5-9B
   default_sampling_params:
     temperature: 0.7
     top_p: 0.9
     max_tokens: 8192
     stop: []
-
-# Model routing per role
 roles:
   WatsonMain:
-    model: "default"
+    model: default
     temperature: 0.7
     max_tokens: 8192
   WatsonMemory:
-    model: "default"
+    model: default
     temperature: 0.3
     max_tokens: 4096
   WatsonReviewer:
-    model: "default"
+    model: default
     temperature: 0.5
     max_tokens: 4096
   WatsonDev:
-    model: "default"
+    model: default
     temperature: 0.7
     max_tokens: 8192
   iTrader:
-    model: "default"
+    model: default
     temperature: 0.5
     max_tokens: 2048
-
-# Inference provider config (for Hermes adapter)
 inference:
-  provider: "vllm"
-  base_url: "http://localhost:8001/v1"
-  # When accessed via ZeroTier, use the ZT IP instead:
-  # base_url: "http://<zerotier_ip>:8001/v1"
-  api_key_env: "VLLM_API_KEY"
+  provider: vllm
+  base_url: http://localhost:8001/v1
+  api_key_env: VLLM_API_KEY
   timeout_s: 120
-  max_context: 65536
+  max_context: 131072
   structured_json_mode: true
   retries: 2
   backoff_s: 1.5
-
-# API key for authentication (optional but recommended)
 auth:
-  api_key: ""    # Set via VLLM_API_KEY env var or here
+  api_key: ''
