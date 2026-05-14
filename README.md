@@ -1,6 +1,6 @@
 # vLLM Server Gateway
 
-Windows-native vLLM inference gateway for Hermes/Watson, iTrader, and future projects that need a reusable OpenAI-compatible local model service.
+WSL-first vLLM inference gateway for Hermes/Watson, iTrader, and future projects that need a reusable OpenAI-compatible model service.
 
 The stack is intentionally split into two services:
 
@@ -40,6 +40,30 @@ Confirm CUDA/GPU visibility:
 
 ```powershell
 nvidia-smi
+```
+
+### WSL2 Runtime (recommended for `vllm._C`)
+
+If Windows Python reports `missing_vllm_compiled_runtime`, launch through WSL2 using a Linux venv that already contains `vllm._C`.
+
+```powershell
+.\scripts\start_wsl.ps1 preflight
+.\scripts\start_wsl.ps1 dry-run
+.\scripts\start_wsl.ps1 start
+.\scripts\start_wsl.ps1 status
+.\scripts\start_wsl.ps1 stop
+```
+
+Defaults:
+
+- distro: `Ubuntu`
+- Linux Python: `/home/juanbeck/vLLM-server/venv/bin/python`
+
+Override the interpreter if needed:
+
+```powershell
+$env:VLLM_WSL_PYTHON = "/home/<user>/<repo>/venv/bin/python"
+.\scripts\start_wsl.ps1 preflight
 ```
 
 ## Model Download
@@ -95,8 +119,6 @@ Expected first profile command includes:
 --model D:\MODELS\cyankiwi\Qwen3.6-27B-AWQ-INT4
 --quantization compressed-tensors
 --max-model-len 16384
---cpu-offload-gb 8
---swap-space 8
 --max-num-seqs 2
 --language-model-only
 --reasoning-parser qwen3
@@ -108,7 +130,17 @@ If the local model directory is missing, dry-run prints the Hugging Face ID inst
 
 ## Launch
 
-Use the Windows launcher:
+Recommended: WSL2 launcher (first choice)
+
+```powershell
+.\scripts\start_wsl.ps1 dry-run
+.\scripts\start_wsl.ps1 preflight
+.\scripts\start_wsl.ps1 start
+.\scripts\start_wsl.ps1 status
+.\scripts\start_wsl.ps1 stop
+```
+
+Windows launcher (fallback only):
 
 ```powershell
 .\scripts\start.ps1 dry-run
@@ -233,6 +265,7 @@ Accept 32k only after concurrency 1 works without repeated OOM. Treat 64k as exp
 ## More Docs
 
 - [Serving topology](docs/vllm-topology.md)
+- [ZeroTier routing runbook (main server)](docs/zerotier-routing-runbook.md)
 - [Qwen3.6 AWQ INT4 test plan](docs/qwen36-awq-int4-test-plan.md)
 - [Future package handoff](docs/package-handoff.md)
 - [Original GPT-5.5 handoff note](docs/HERMES_Watson_Qwen36_AWQ_INT4_Codex_Update.md)

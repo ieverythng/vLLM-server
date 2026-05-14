@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -31,7 +32,6 @@ class VLLMManager:
         "dtype": "--dtype",
         "tensor_parallel_size": "--tensor-parallel-size",
         "cpu_offload_gb": "--cpu-offload-gb",
-        "swap_space": "--swap-space",
         "max_num_seqs": "--max-num-seqs",
         "reasoning_parser": "--reasoning-parser",
         "tool_call_parser": "--tool-call-parser",
@@ -49,6 +49,7 @@ class VLLMManager:
         self.models = self._load_yaml(self.models_path)
         self.process: Optional[subprocess.Popen[str]] = None
         self.pid_file = BASE_DIR / "vllm.pid"
+        self._supported_flags_cache: Optional[set[str]] = None
 
     @staticmethod
     def _load_yaml(path: Path) -> dict[str, Any]:
@@ -73,17 +74,25 @@ class VLLMManager:
         if override and Path(override).exists():
             return override
 
-        candidates = [
-            BASE_DIR / ".venv311" / "Scripts" / "python.exe",
-            BASE_DIR / ".venv" / "Scripts" / "python.exe",
-            BASE_DIR / ".venv311" / "bin" / "python",
-            BASE_DIR / ".venv" / "bin" / "python",
-            BASE_DIR / "venv" / "bin" / "python",
-        ]
+        current = Path(sys.executable)
+        if current.exists():
+            return str(current)
+
+        if os.name == "nt":
+            candidates = [
+                BASE_DIR / ".venv311" / "Scripts" / "python.exe",
+                BASE_DIR / ".venv" / "Scripts" / "python.exe",
+            ]
+        else:
+            candidates = [
+                BASE_DIR / "venv" / "bin" / "python",
+                BASE_DIR / ".venv311" / "bin" / "python",
+                BASE_DIR / ".venv" / "bin" / "python",
+            ]
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
-        return sys.executable
+        return str(current)
 
     def _runtime_probe(self) -> dict[str, Any]:
         python_exe = self._python_executable()
@@ -114,6 +123,21 @@ class VLLMManager:
             "stderr": stderr,
             "platform": platform.system(),
         }
+
+    def _supported_cli_flags(self) -> set[str]:
+        if self._supported_flags_cache is not None:
+            return self._supported_flags_cache
+
+        python_exe = self._python_executable()
+        result = subprocess.run(
+            [python_exe, "-m", "vllm.entrypoints.openai.api_server", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=str(BASE_DIR),
+        )
+        help_text = f"{result.stdout or ''}\n{result.stderr or ''}"
+        self._supported_flags_cache = set(re.findall(r"--[a-z0-9][a-z0-9-]*", help_text))
+        return self._supported_flags_cache
 
     def preflight(self) -> bool:
         probe = self._runtime_probe()
@@ -158,16 +182,42 @@ class VLLMManager:
         return profile
 
     @staticmethod
+    def _resolve_local_model_path(local_path: str | None) -> str | None:
+        if not local_path:
+            return None
+
+        raw = str(local_path).strip()
+        if not raw:
+            return None
+
+        candidate = Path(raw)
+        if candidate.exists():
+            return str(candidate)
+
+        # In WSL/Linux, map Windows drive paths like D:/MODELS/... or D:\MODELS\...
+        # to /mnt/d/MODELS/... so local model caching can still be reused.
+        if os.name != "nt":
+            m = re.match(r"^([A-Za-z]):[\\/](.*)$", raw)
+            if m:
+                drive = m.group(1).lower()
+                suffix = m.group(2).replace("\\", "/")
+                wsl_candidate = Path(f"/mnt/{drive}/{suffix}")
+                if wsl_candidate.exists():
+                    return str(wsl_candidate)
+        return None
+
+    @staticmethod
     def _model_ref(profile: dict[str, Any]) -> str:
-        local_path = profile.get("local_path")
-        if profile.get("prefer_local_path") and local_path and Path(str(local_path)).exists():
-            return str(local_path)
+        local_path = VLLMManager._resolve_local_model_path(profile.get("local_path"))
+        if profile.get("prefer_local_path") and local_path:
+            return local_path
         return str(profile["model_id"])
 
     def _build_command(self) -> list[str]:
         """Build the vLLM OpenAI server command from the active profile."""
         profile = self.active_profile()
         backend_cfg = self.config.get("backend", {})
+        supported_flags = self._supported_cli_flags()
         cmd = [
             self._python_executable(),
             "-m",
@@ -184,12 +234,17 @@ class VLLMManager:
             value = profile.get(key)
             if key == "tensor_parallel_size" and int(value or 1) <= 1:
                 continue
+            if flag not in supported_flags:
+                continue
             self._append_option(cmd, flag, value)
         for key, flag in self.PROFILE_FLAGS.items():
+            if flag not in supported_flags:
+                continue
             self._append_flag(cmd, flag, bool(profile.get(key)))
 
         api_key = os.environ.get("VLLM_API_KEY") or self.config.get("auth", {}).get("api_key", "")
-        self._append_option(cmd, "--api-key", api_key)
+        if "--api-key" in supported_flags:
+            self._append_option(cmd, "--api-key", api_key)
         return cmd
 
     def dry_run(self) -> list[str]:
@@ -228,6 +283,8 @@ class VLLMManager:
 
         env = os.environ.copy()
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        # VLLM_PYTHON is a manager-only override and is not recognized by vLLM.
+        env.pop("VLLM_PYTHON", None)
 
         log_file = open(BASE_DIR / "vllm.log", "a", encoding="utf-8")
         self.process = subprocess.Popen(
@@ -237,6 +294,7 @@ class VLLMManager:
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         self.pid_file.write_text(str(self.process.pid), encoding="utf-8")
         print(f"vLLM server started (PID: {self.process.pid})")

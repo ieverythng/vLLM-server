@@ -6,11 +6,21 @@ dist/
 build/
 *.egg
 
-# Virtual environment
+# Virtual environments
 venv/
+.venv/
+.venv311/
+.venv_wsl/
 
-# Logs
+# Logs and runtime artifacts
 *.log
+*.pid
+*.out
+*.err
+
+# Local scratch/test artifacts
+_tmp_*.tar.gz
+wsl_test.txt
 
 # IDE
 .vscode/
@@ -19,5 +29,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
-/.venv
-/.venv311
+
+# Large local unpacked vendor trees
+/vllm-0.20.2/
