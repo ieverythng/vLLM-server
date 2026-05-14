@@ -249,6 +249,19 @@ iTRADER task-pool benchmark against the same endpoint:
 
 Then increase to concurrency 2 and 4. Move to the 32k profile only after 16k is stable. Move to 64k only after 32k works, and test only concurrency 1 first.
 
+Quick tok/s + long-context sweep (auto-resolves served model ID from `/v1/models` to avoid 404 name mismatches):
+
+```powershell
+/home/juanbeck/vLLM-server/venv/bin/python scripts/benchmark_tokps.py \
+  --base-url http://127.0.0.1:8001 \
+  --auto-model \
+  --requests 4 \
+  --concurrency 2 \
+  --max-tokens 384 \
+  --context-sweep \
+  --output reports/benchmark-tokps.json
+```
+
 ## Pass Criteria
 
 Accept 16k as usable when:
